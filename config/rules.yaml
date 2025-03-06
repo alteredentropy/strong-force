@@ -1,0 +1,13 @@
+allow_write_operations: false
+allowed_tables:
+  - customers
+  - orders
+disallowed_tables:
+  - users
+disallowed_patterns:
+  - DROP
+  - ALTER
+  - TRUNCATE
+synonyms:
+  sales: orders
+  clients: customers
