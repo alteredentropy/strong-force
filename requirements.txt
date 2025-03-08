@@ -1,4 +1,5 @@
 flask
 sqlalchemy
 psycopg2-binary
-autogen
+autogen-agentchat
+autogen-ext[openai,web-surfer,docker]

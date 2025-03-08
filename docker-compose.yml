@@ -18,7 +18,8 @@ services:
     container_name: myapp_app
     environment:
       - DATABASE_URL=postgresql+psycopg2://postgres:postgres@db:5432/mydb
-      - OPENAI_API_KEY=<your-openai-key>
+      - OPENAI_API_KEY=${OPENAI_API_KEY} 
+      - OPENAI_ORG_ID=${OPENAI_ORG_ID} 
       - FLASK_ENV=development
     ports:
       - "5000:5000"

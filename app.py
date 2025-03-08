@@ -5,21 +5,32 @@ from datetime import datetime
 from flask import Flask, request, jsonify
 from sqlalchemy import create_engine, text, MetaData
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError, ProgrammingError
+from dotenv import load_dotenv
+from config import rules
+from autogen_agentchat.agents import AssistantAgent, UserProxyAgent
+from autogen_agentchat.conditions import TextMentionTermination, MaxMessageTermination, HandoffTermination
+from autogen_agentchat.teams import RoundRobinGroupChat, SelectorGroupChat, Swarm, MagenticOneGroupChat
+from autogen_ext.models.openai import OpenAIChatCompletionClient
+from autogen_ext.agents.web_surfer import MultimodalWebSurfer
+from autogen_agentchat.messages import AgentEvent, ChatMessage, HandoffMessage
+from autogen_core.memory import ListMemory, MemoryContent, MemoryMimeType
+from autogen_agentchat.messages import MultiModalMessage
+from autogen_core import CancellationToken
+from autogen_core import Image
+from autogen_core.tools import FunctionTool
+# Load environment variables from the .env file
+load_dotenv()
 
 # ------------------------------------------------------------------------------
-# Autogen Integration
+# OpenAI Integration
 # ------------------------------------------------------------------------------
-try:
-    from autogen import Agent
-except ImportError:
-    raise ImportError("Autogen module not found. Please install autogen to proceed.")
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise EnvironmentError("OPENAI_API_KEY environment variable is required for Autogen integration.")
+OPENAI_ORG_ID = os.getenv("OPENAI_ORG_ID")
 
-# Create an agent instance (model can be adjusted as needed)
-autogen_agent = Agent(api_key=OPENAI_API_KEY, model="gpt-4")
 
 # ------------------------------------------------------------------------------
 # Flask Application Setup
@@ -53,33 +64,15 @@ def load_schema():
 # ------------------------------------------------------------------------------
 # Business Logic Configuration
 # ------------------------------------------------------------------------------
-BUSINESS_RULES = {
-    "allow_write_operations": True,  # Global flag to allow/disallow mutations.
-    "rules": [
-        # Example: Block DELETE on the "users" table.
-        {
-            "operation": "DELETE",
-            "table": "users",
-            "allowed": False,
-            "errorMessage": "Deletion of users is disallowed by policy."
-        },
-        # Example: Block specific UPDATE on "orders" when changing status from 'pending' to 'closed'.
-        {
-            "operation": "UPDATE",
-            "table": "orders",
-            "condition": "old_status = 'pending' AND new_status = 'closed'",
-            "allowed": False,
-            "errorMessage": "Cannot close an order if it is pending payment."
-        }
-    ],
-    "disallowed_patterns": ["DROP", "ALTER", "TRUNCATE"]
-}
+BUSINESS_RULES = rules
+
 
 # ------------------------------------------------------------------------------
-# Utility Functions
+# Model Tooling
 # ------------------------------------------------------------------------------
 
-def extract_operation(sql):
+# TODO: Should return an enum of either SELECT, DELETE, OR UPDATE
+def extract_operation(sql: str)-> str:
     """
     Extract the SQL operation (first word) from the given SQL statement.
     """
@@ -87,38 +80,120 @@ def extract_operation(sql):
         return ""
     return sql.strip().split()[0].upper()
 
+
 def extract_table_name(sql, operation):
     """
-    Extract the target table name from the SQL statement using basic regex patterns.
+    Extract the target database, schema, and table name from the SQL statement using regex.
+    Assumes the table reference is always fully qualified in the format:
+      database.schema.table
     Supports SELECT, INSERT, UPDATE, and DELETE statements.
+    
+    Returns:
+        A dictionary with keys 'database', 'schema', and 'table'. For example:
+          { "database": "mydb", "schema": "public", "table": "customers" }
+        If no match is found, returns None.
     """
-    table = None
+    pattern = None
     if operation == "SELECT":
-        match = re.search(r"FROM\s+([a-zA-Z_][a-zA-Z0-9_]*)", sql, re.IGNORECASE)
-        if match:
-            table = match.group(1)
+        pattern = r"FROM\s+(?P<database>[a-zA-Z_][a-zA-Z0-9_]*)\.(?P<schema>[a-zA-Z_][a-zA-Z0-9_]*)\.(?P<table>[a-zA-Z_][a-zA-Z0-9_]*)"
     elif operation == "INSERT":
-        match = re.search(r"INSERT\s+INTO\s+([a-zA-Z_][a-zA-Z0-9_]*)", sql, re.IGNORECASE)
-        if match:
-            table = match.group(1)
+        pattern = r"INSERT\s+INTO\s+(?P<database>[a-zA-Z_][a-zA-Z0-9_]*)\.(?P<schema>[a-zA-Z_][a-zA-Z0-9_]*)\.(?P<table>[a-zA-Z_][a-zA-Z0-9_]*)"
     elif operation == "UPDATE":
-        match = re.search(r"UPDATE\s+([a-zA-Z_][a-zA-Z0-9_]*)", sql, re.IGNORECASE)
-        if match:
-            table = match.group(1)
+        pattern = r"UPDATE\s+(?P<database>[a-zA-Z_][a-zA-Z0-9_]*)\.(?P<schema>[a-zA-Z_][a-zA-Z0-9_]*)\.(?P<table>[a-zA-Z_][a-zA-Z0-9_]*)"
     elif operation == "DELETE":
-        match = re.search(r"DELETE\s+FROM\s+([a-zA-Z_][a-zA-Z0-9_]*)", sql, re.IGNORECASE)
+        pattern = r"DELETE\s+FROM\s+(?P<database>[a-zA-Z_][a-zA-Z0-9_]*)\.(?P<schema>[a-zA-Z_][a-zA-Z0-9_]*)\.(?P<table>[a-zA-Z_][a-zA-Z0-9_]*)"
+    
+    if pattern:
+        match = re.search(pattern, sql, re.IGNORECASE)
         if match:
-            table = match.group(1)
-    return table.lower() if table else None
+            groups = match.groupdict()
+            return {
+                "database": groups["database"].lower(),
+                "schema": groups["schema"].lower(),
+                "table": groups["table"].lower(),
+            }
+    return None
 
-def parse_nl_to_sql(nl_query, allowed_ops):
+extract_operation_tool = FunctionTool(extract_operation, description="Extract the SQL operation (first word) from the given SQL statement")
+extract_table_name_tool = FunctionTool(extract_table_name, description="Extract the target database, schema, and table name from the SQL statement")
+
+
+# ------------------------------------------------------------------------------
+# Agents
+# ------------------------------------------------------------------------------
+
+def create_agent_sql_parcer():
+
+    model_client = OpenAIChatCompletionClient(
+        model="gpt-4o",
+        api_key=OPENAI_API_KEY,
+        organization=OPENAI_ORG_ID
+        )
+
+    agent = AssistantAgent(
+        name="SQL Part Extractor",
+        model_client=model_client,
+        tools=[extract_operation_tool,extract_table_name_tool],
+        description="Extracts out different parts of a valid PostgreSQL SQL query",
+        system_message="""You are an AI assistant that Extracts out different parts of a valid PostgreSQL SQL query.
+        You can extract the statement type and the full table name with the use of your tools.
+        """,
+        )
+
+    return agent
+
+def create_agent_nl_parcer():
+
+    model_client = OpenAIChatCompletionClient(
+        model="gpt-4o",
+        api_key=OPENAI_API_KEY,
+        organization=OPENAI_ORG_ID
+        )
+
+    agent = AssistantAgent(
+        name="Natural Language to SQL Parcer",
+        model_client=model_client,
+        #tools=[extract_operation_tool,extract_table_name_tool],
+        description="Converts natural language requests into valid PostgreSQL SQL queries",
+        system_message="""You are an AI assistant that converts natural language requests into valid PostgreSQL SQL queries.
+        """,
+        )
+
+    return agent
+
+
+def create_agent_verify_sql():
+
+    model_client = OpenAIChatCompletionClient(
+        model="gpt-4o",
+        api_key=OPENAI_API_KEY,
+        organization=OPENAI_ORG_ID
+        )
+
+    agent = AssistantAgent(
+        name="Natural Language to SQL Parcer",
+        model_client=model_client,
+        #tools=[extract_operation_tool,extract_table_name_tool],
+        description="Converts natural language requests into valid PostgreSQL SQL queries",
+        system_message="""You are an AI assistant that converts natural language requests into valid PostgreSQL SQL queries.
+        """,
+        )
+
+    return agent
+
+
+# ------------------------------------------------------------------------------
+# Utility Functions
+# ------------------------------------------------------------------------------
+
+
+
+def parse_nl_to_sql(nl_query):
     """
     Use Autogen to convert a natural language query into a valid PostgreSQL SQL statement.
     
     Parameters:
         nl_query (str): The natural language request.
-        allowed_ops (list): Allowed SQL operations (e.g. ["SELECT"] for queries,
-                            or ["INSERT", "UPDATE", "DELETE"] for mutations).
                             
     Returns:
         sql (str): The generated SQL statement.
@@ -126,22 +201,27 @@ def parse_nl_to_sql(nl_query, allowed_ops):
     Raises:
         ValueError: If the AI fails to parse the request or the generated operation is not allowed.
     """
-    prompt = (
-        "You are an AI assistant that converts natural language requests into valid PostgreSQL SQL queries.\n"
-        f"Database schema: {json.dumps(SCHEMA_INFO)}\n"
-        f"Allowed SQL operations: {', '.join(allowed_ops)}\n"
-        f"User request: \"{nl_query}\"\n"
-        "Respond only with a SQL query without any additional commentary."
-    )
+
+
+    agent = create_agent_nl_parcer()
+
     try:
-        response = autogen_agent.run(prompt)
+        response = agent.run(task=f"""
+                Convert this natural language statement into a valid SQL statement.
+                Language statement: {nl_query}
+                """)
         sql = response.strip()
     except Exception as e:
         raise ValueError("Autogen parsing failed: " + str(e))
-    op = extract_operation(sql)
-    if op not in allowed_ops:
-        raise ValueError(f"Generated SQL operation '{op}' is not allowed. Expected one of {allowed_ops}.")
     return sql
+
+
+
+
+
+
+
+
 
 def apply_business_rules(sql, query_type):
     """
