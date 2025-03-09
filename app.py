@@ -222,6 +222,19 @@ def parse_nl_to_sql(nl_query):
     return sql
 
 
+def parse_sql(sql):
+
+    agent = create_agent_sql_parcer()
+    sql=None
+    try:
+        response = agent.run(task=f"""
+                Extract out the Statement type (select, update, or delete) and the source table name.
+                SQL statement: {sql}
+                """)
+        response = response.strip()
+    except Exception as e:
+        raise ValueError("Autogen parsing failed: " + str(e))
+    return response
 
 
 
@@ -340,8 +353,10 @@ def query_endpoint():
             "hint": "Include your natural language query in the 'q' parameter."
         }, 400)
     try:
-        # Convert natural language to SQL, allowing only SELECT operations.
-        sql = parse_nl_to_sql(q, allowed_ops=["SELECT"])
+        
+        sql = parse_nl_to_sql(q)
+            = create_agent_sql_parcer
+
     except ValueError as ve:
         return error_response({
             "errorCode": "ERR_PARSE_FAILURE",
