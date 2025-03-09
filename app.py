@@ -6,7 +6,8 @@ from flask import Flask, request, jsonify
 from sqlalchemy import create_engine, text, MetaData
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError, ProgrammingError
 from dotenv import load_dotenv
-from config import rules
+import yaml
+
 from autogen_agentchat.agents import AssistantAgent, UserProxyAgent
 from autogen_agentchat.conditions import TextMentionTermination, MaxMessageTermination, HandoffTermination
 from autogen_agentchat.teams import RoundRobinGroupChat, SelectorGroupChat, Swarm, MagenticOneGroupChat
@@ -20,6 +21,7 @@ from autogen_core import Image
 from autogen_core.tools import FunctionTool
 # Load environment variables from the .env file
 load_dotenv()
+
 
 # ------------------------------------------------------------------------------
 # OpenAI Integration
@@ -64,8 +66,12 @@ def load_schema():
 # ------------------------------------------------------------------------------
 # Business Logic Configuration
 # ------------------------------------------------------------------------------
-BUSINESS_RULES = rules
 
+# Path to your YAML file
+rules_path = os.path.join(os.path.dirname(__file__), "config", "rules.yaml")
+
+with open(rules_path, "r") as f:
+    BUSINESS_RULES = yaml.safe_load(f)
 
 # ------------------------------------------------------------------------------
 # Model Tooling
@@ -81,7 +87,7 @@ def extract_operation(sql: str)-> str:
     return sql.strip().split()[0].upper()
 
 
-def extract_table_name(sql, operation):
+def extract_table_name(sql: str, operation: str) -> dict:
     """
     Extract the target database, schema, and table name from the SQL statement using regex.
     Assumes the table reference is always fully qualified in the format:
@@ -171,11 +177,11 @@ def create_agent_verify_sql():
         )
 
     agent = AssistantAgent(
-        name="Natural Language to SQL Parcer",
+        name="Valid SQL Checker",
         model_client=model_client,
         #tools=[extract_operation_tool,extract_table_name_tool],
-        description="Converts natural language requests into valid PostgreSQL SQL queries",
-        system_message="""You are an AI assistant that converts natural language requests into valid PostgreSQL SQL queries.
+        description="Checks the incomming message and verifies if its valid SQL or not",
+        system_message="""You are an AI assistant that checks the incomming message and verifies if its valid SQL or not.
         """,
         )
 
@@ -204,7 +210,7 @@ def parse_nl_to_sql(nl_query):
 
 
     agent = create_agent_nl_parcer()
-
+    sql=None
     try:
         response = agent.run(task=f"""
                 Convert this natural language statement into a valid SQL statement.
@@ -299,6 +305,8 @@ def execute_sql(sql):
             "hint": "Check the SQL syntax and try again."
         })
 
+
+
 def error_response(error_obj, status_code=400):
     """
     Return a JSON-formatted error response.
@@ -308,6 +316,8 @@ def error_response(error_obj, status_code=400):
         "reason": error_obj.get("reason", "An error occurred."),
         "hint": error_obj.get("hint", "")
     }), status_code
+
+
 
 # ------------------------------------------------------------------------------
 # Flask Endpoints
@@ -351,6 +361,9 @@ def query_endpoint():
     except Exception as e:
         err_obj = e.args[0] if e.args else {}
         return error_response(err_obj, 400)
+
+
+
 
 @app.route("/mutate", methods=["POST"])
 def mutate_endpoint():

@@ -1,4 +1,6 @@
 flask
+dotenv
+pyyaml
 sqlalchemy
 psycopg2-binary
 autogen-agentchat
