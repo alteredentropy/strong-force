@@ -128,7 +128,7 @@ extract_table_name_tool = FunctionTool(extract_table_name, description="Extract 
 # Agents
 # ------------------------------------------------------------------------------
 
-def create_agent_sql_parcer():
+async def create_agent_sql_parcer():
 
     model_client = OpenAIChatCompletionClient(
         model="gpt-4o",
@@ -148,7 +148,7 @@ def create_agent_sql_parcer():
 
     return agent
 
-def create_agent_nl_parcer():
+async def create_agent_nl_parcer():
 
     model_client = OpenAIChatCompletionClient(
         model="gpt-4o",
@@ -168,7 +168,7 @@ def create_agent_nl_parcer():
     return agent
 
 
-def create_agent_verify_sql():
+async def create_agent_verify_sql():
 
     model_client = OpenAIChatCompletionClient(
         model="gpt-4o",
@@ -194,7 +194,7 @@ def create_agent_verify_sql():
 
 
 
-def parse_nl_to_sql(nl_query):
+async def parse_nl_to_sql(nl_query):
     """
     Use Autogen to convert a natural language query into a valid PostgreSQL SQL statement.
     
@@ -209,10 +209,10 @@ def parse_nl_to_sql(nl_query):
     """
 
 
-    agent = create_agent_nl_parcer()
+    agent = await create_agent_nl_parcer()
     sql=None
     try:
-        response = agent.run(task=f"""
+        response = await agent.run(task=f"""
                 Convert this natural language statement into a valid SQL statement.
                 Language statement: {nl_query}
                 """)
@@ -222,12 +222,12 @@ def parse_nl_to_sql(nl_query):
     return sql
 
 
-def parse_sql(sql):
+async def parse_sql(sql):
 
-    agent = create_agent_sql_parcer()
+    agent = await create_agent_sql_parcer()
     sql=None
     try:
-        response = agent.run(task=f"""
+        response = await agent.run(task=f"""
                 Extract out the Statement type (select, update, or delete) and the source table name.
                 SQL statement: {sql}
                 """)
@@ -287,6 +287,8 @@ def apply_business_rules(sql, query_type):
             # Detailed condition checks (if implemented) would go here.
     return sql
 
+
+
 def execute_sql(sql):
     """
     Execute the SQL statement using SQLAlchemy.
@@ -337,7 +339,7 @@ def error_response(error_obj, status_code=400):
 # ------------------------------------------------------------------------------
 
 @app.route("/query", methods=["GET"])
-def query_endpoint():
+async def query_endpoint():
     """
     GET /query for read-only operations.
     Expects a natural language query provided via the 'q' parameter or JSON body.
@@ -353,9 +355,8 @@ def query_endpoint():
             "hint": "Include your natural language query in the 'q' parameter."
         }, 400)
     try:
-        
-        sql = parse_nl_to_sql(q)
-            = create_agent_sql_parcer
+        sql = await parse_nl_to_sql(q)
+        sql_meta = await parse_sql(sql.messages[1].content)
 
     except ValueError as ve:
         return error_response({
