@@ -6,6 +6,7 @@ from flask import Flask, request, jsonify
 from sqlalchemy import create_engine, text, MetaData
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError, ProgrammingError
 from dotenv import load_dotenv
+from pydantic import BaseModel
 import yaml
 
 from autogen_agentchat.agents import AssistantAgent, UserProxyAgent
@@ -90,39 +91,54 @@ def extract_operation(sql: str)-> str:
 def extract_table_name(sql: str, operation: str) -> dict:
     """
     Extract the target database, schema, and table name from the SQL statement using regex.
-    Assumes the table reference is always fully qualified in the format:
-      database.schema.table
-    Supports SELECT, INSERT, UPDATE, and DELETE statements.
+    Supports three forms:
+      1. table
+      2. schema.table
+      3. database.schema.table
+    for SELECT, INSERT, UPDATE, and DELETE statements.
     
     Returns:
         A dictionary with keys 'database', 'schema', and 'table'. For example:
           { "database": "mydb", "schema": "public", "table": "customers" }
+        If a part is not provided, its value will be None.
         If no match is found, returns None.
     """
     pattern = None
-    if operation == "SELECT":
-        pattern = r"FROM\s+(?P<database>[a-zA-Z_][a-zA-Z0-9_]*)\.(?P<schema>[a-zA-Z_][a-zA-Z0-9_]*)\.(?P<table>[a-zA-Z_][a-zA-Z0-9_]*)"
-    elif operation == "INSERT":
-        pattern = r"INSERT\s+INTO\s+(?P<database>[a-zA-Z_][a-zA-Z0-9_]*)\.(?P<schema>[a-zA-Z_][a-zA-Z0-9_]*)\.(?P<table>[a-zA-Z_][a-zA-Z0-9_]*)"
-    elif operation == "UPDATE":
-        pattern = r"UPDATE\s+(?P<database>[a-zA-Z_][a-zA-Z0-9_]*)\.(?P<schema>[a-zA-Z_][a-zA-Z0-9_]*)\.(?P<table>[a-zA-Z_][a-zA-Z0-9_]*)"
-    elif operation == "DELETE":
-        pattern = r"DELETE\s+FROM\s+(?P<database>[a-zA-Z_][a-zA-Z0-9_]*)\.(?P<schema>[a-zA-Z_][a-zA-Z0-9_]*)\.(?P<table>[a-zA-Z_][a-zA-Z0-9_]*)"
+    op = operation.upper()
+    if op == "SELECT":
+        pattern = (r"FROM\s+"
+                   r"(?:(?P<database>[a-zA-Z_][a-zA-Z0-9_]*)\.)?"  # optional database
+                   r"(?:(?P<schema>[a-zA-Z_][a-zA-Z0-9_]*)\.)?"    # optional schema
+                   r"(?P<table>[a-zA-Z_][a-zA-Z0-9_]*)")            # required table
+    elif op == "INSERT":
+        pattern = (r"INSERT\s+INTO\s+"
+                   r"(?:(?P<database>[a-zA-Z_][a-zA-Z0-9_]*)\.)?"
+                   r"(?:(?P<schema>[a-zA-Z_][a-zA-Z0-9_]*)\.)?"
+                   r"(?P<table>[a-zA-Z_][a-zA-Z0-9_]*)")
+    elif op == "UPDATE":
+        pattern = (r"UPDATE\s+"
+                   r"(?:(?P<database>[a-zA-Z_][a-zA-Z0-9_]*)\.)?"
+                   r"(?:(?P<schema>[a-zA-Z_][a-zA-Z0-9_]*)\.)?"
+                   r"(?P<table>[a-zA-Z_][a-zA-Z0-9_]*)")
+    elif op == "DELETE":
+        pattern = (r"DELETE\s+FROM\s+"
+                   r"(?:(?P<database>[a-zA-Z_][a-zA-Z0-9_]*)\.)?"
+                   r"(?:(?P<schema>[a-zA-Z_][a-zA-Z0-9_]*)\.)?"
+                   r"(?P<table>[a-zA-Z_][a-zA-Z0-9_]*)")
     
     if pattern:
         match = re.search(pattern, sql, re.IGNORECASE)
         if match:
             groups = match.groupdict()
             return {
-                "database": groups["database"].lower(),
-                "schema": groups["schema"].lower(),
-                "table": groups["table"].lower(),
+                "database": groups.get("database", None).lower() if groups.get("database") else None,
+                "schema": groups.get("schema", None).lower() if groups.get("schema") else None,
+                "table": groups.get("table", None).lower() if groups.get("table") else None,
             }
     return None
 
-extract_operation_tool = FunctionTool(extract_operation, description="Extract the SQL operation (first word) from the given SQL statement")
-extract_table_name_tool = FunctionTool(extract_table_name, description="Extract the target database, schema, and table name from the SQL statement")
-
+extract_operation_tool = FunctionTool(extract_operation, name="extract_operation", description="Extracts the operation type from a SQL query.", strict=True)
+extract_table_name_tool = FunctionTool(extract_table_name, name="extract_table_name", description="Extracts the table name from a SQL query.", strict=True)
 
 # ------------------------------------------------------------------------------
 # Agents
@@ -132,6 +148,7 @@ async def create_agent_sql_parcer():
 
     model_client = OpenAIChatCompletionClient(
         model="gpt-4o",
+        response_format=AgentResponseTableName,
         api_key=OPENAI_API_KEY,
         organization=OPENAI_ORG_ID
         )
@@ -193,7 +210,6 @@ async def create_agent_verify_sql():
 # ------------------------------------------------------------------------------
 
 
-
 async def parse_nl_to_sql(nl_query):
     """
     Use Autogen to convert a natural language query into a valid PostgreSQL SQL statement.
@@ -225,13 +241,11 @@ async def parse_nl_to_sql(nl_query):
 async def parse_sql(sql):
 
     agent = await create_agent_sql_parcer()
-    sql=None
     try:
         response = await agent.run(task=f"""
                 Extract out the Statement type (select, update, or delete) and the source table name.
                 SQL statement: {sql}
                 """)
-        response = response.strip()
     except Exception as e:
         raise ValueError("Autogen parsing failed: " + str(e))
     return response
@@ -333,6 +347,23 @@ def error_response(error_obj, status_code=400):
     }), status_code
 
 
+# ------------------------------------------------------------------------------
+# Response structures
+# ------------------------------------------------------------------------------
+
+class ResponseTableName(BaseModel):
+    database: Optional[str]
+    schema: Optional[str]
+    table: Optional[str]
+
+class ResponseOperation(BaseModel):
+    operation: Literal['SELECT','DELETE','UPDATE']
+
+
+class AgentResponseTableName(BaseModel):
+    thoughts: str
+    operation: ResponseOperation
+    table_name: ResponseTableName
 
 # ------------------------------------------------------------------------------
 # Flask Endpoints
@@ -357,6 +388,7 @@ async def query_endpoint():
     try:
         sql = await parse_nl_to_sql(q)
         sql_meta = await parse_sql(sql.messages[1].content)
+        sql_meta_formatted = AgentResponseTableName.model_validate_json(sql_meta.messages[-1].content)
 
     except ValueError as ve:
         return error_response({
@@ -364,20 +396,20 @@ async def query_endpoint():
             "reason": str(ve),
             "hint": "Rephrase your query using clearer language."
         }, 400)
-    if extract_operation(sql) != "SELECT":
+    if sql_meta_formatted.operation != "SELECT":
         return error_response({
             "errorCode": "ERR_INVALID_ENDPOINT",
             "reason": "Non-SELECT operations are not allowed on the /query endpoint.",
             "hint": "Use the /mutate endpoint for data modifications."
         }, 400)
     try:
-        approved_sql = apply_business_rules(sql, query_type="read")
+
+        approved_sql = apply_business_rules(sql.messages[1].content, query_type="read")
         result = execute_sql(approved_sql)
         return jsonify(result), 200
     except Exception as e:
         err_obj = e.args[0] if e.args else {}
         return error_response(err_obj, 400)
-
 
 
 
