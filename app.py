@@ -7,6 +7,7 @@ from sqlalchemy import create_engine, text, MetaData
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError, ProgrammingError
 from dotenv import load_dotenv
 from pydantic import BaseModel
+from typing import Sequence, Optional, Dict, Literal
 import yaml
 
 from autogen_agentchat.agents import AssistantAgent, UserProxyAgent
@@ -229,7 +230,7 @@ async def parse_nl_to_sql(nl_query):
     sql=None
     try:
         response = await agent.run(task=f"""
-                Convert this natural language statement into a valid SQL statement.
+                Convert this natural language statement into a valid SQL statement .Do not include markup and return only the sql statement.
                 Language statement: {nl_query}
                 """)
         sql = response.strip()
@@ -414,7 +415,7 @@ async def query_endpoint():
 
 
 @app.route("/mutate", methods=["POST"])
-def mutate_endpoint():
+async def mutate_endpoint():
     """
     POST /mutate for data mutation operations.
     Expects a JSON body with the field 'q' containing the natural language command.
@@ -434,22 +435,25 @@ def mutate_endpoint():
             "hint": "Provide a natural language command in the 'q' field."
         }, 400)
     try:
-        # Convert natural language to SQL, allowing only mutation operations.
-        sql = parse_nl_to_sql(q, allowed_ops=["INSERT", "UPDATE", "DELETE"])
+        sql = await parse_nl_to_sql(q)
+        sql_meta = await parse_sql(sql.messages[1].content)
+        sql_meta_formatted = AgentResponseTableName.model_validate_json(sql_meta.messages[-1].content)
+
+
     except ValueError as ve:
         return error_response({
             "errorCode": "ERR_PARSE_FAILURE",
             "reason": str(ve),
             "hint": "Rephrase your command to clearly indicate a data modification."
         }, 400)
-    if extract_operation(sql) == "SELECT":
+    if sql_meta_formatted.operation == "SELECT":
         return error_response({
             "errorCode": "ERR_INVALID_ENDPOINT",
             "reason": "Read-only queries are not allowed on the /mutate endpoint.",
             "hint": "Use the /query endpoint for data retrieval."
         }, 400)
     try:
-        approved_sql = apply_business_rules(sql, query_type="write")
+        approved_sql = apply_business_rules(sql.messages[1].content, query_type="write")
         result = execute_sql(approved_sql)
         return jsonify(result), 200
     except Exception as e:
