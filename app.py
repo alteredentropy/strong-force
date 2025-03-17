@@ -155,7 +155,7 @@ async def create_agent_sql_parcer():
         )
 
     agent = AssistantAgent(
-        name="SQL Part Extractor",
+        name="SQL_Part_Extractor",
         model_client=model_client,
         tools=[extract_operation_tool,extract_table_name_tool],
         description="Extracts out different parts of a valid PostgreSQL SQL query",
@@ -175,7 +175,7 @@ async def create_agent_nl_parcer():
         )
 
     agent = AssistantAgent(
-        name="Natural Language to SQL Parcer",
+        name="Natural_Language_to_SQL_Parcer",
         model_client=model_client,
         #tools=[extract_operation_tool,extract_table_name_tool],
         description="Converts natural language requests into valid PostgreSQL SQL queries",
@@ -195,7 +195,7 @@ async def create_agent_verify_sql():
         )
 
     agent = AssistantAgent(
-        name="Valid SQL Checker",
+        name="Valid_SQL_Checker",
         model_client=model_client,
         #tools=[extract_operation_tool,extract_table_name_tool],
         description="Checks the incomming message and verifies if its valid SQL or not",
@@ -233,7 +233,7 @@ async def parse_nl_to_sql(nl_query):
                 Convert this natural language statement into a valid SQL statement .Do not include markup and return only the sql statement.
                 Language statement: {nl_query}
                 """)
-        sql = response.strip()
+        sql = response
     except Exception as e:
         raise ValueError("Autogen parsing failed: " + str(e))
     return sql
@@ -358,7 +358,7 @@ class ResponseTableName(BaseModel):
     table: Optional[str]
 
 class ResponseOperation(BaseModel):
-    operation: Literal['SELECT','DELETE','UPDATE']
+    operation: Literal['SELECT','DELETE','UPDATE','CREATE']
 
 
 class AgentResponseTableName(BaseModel):
@@ -405,7 +405,7 @@ async def query_endpoint():
         }, 400)
     try:
 
-        approved_sql = apply_business_rules(sql.messages[1].content, query_type="read")
+        approved_sql = sql.messages[1].content #apply_business_rules(sql.messages[1].content, query_type="read")
         result = execute_sql(approved_sql)
         return jsonify(result), 200
     except Exception as e:
@@ -453,7 +453,7 @@ async def mutate_endpoint():
             "hint": "Use the /query endpoint for data retrieval."
         }, 400)
     try:
-        approved_sql = apply_business_rules(sql.messages[1].content, query_type="write")
+        approved_sql = sql.messages[1].content #apply_business_rules(sql.messages[1].content, query_type="write")
         result = execute_sql(approved_sql)
         return jsonify(result), 200
     except Exception as e:
