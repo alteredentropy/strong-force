@@ -323,6 +323,7 @@ def execute_sql(sql):
                 result_list = [dict(row._mapping) for row in rows]
                 return {"data": result_list}
             else:
+                connection.commit()
                 rowcount = result.rowcount
                 return {"success": True, "rows_affected": rowcount}
     except (ProgrammingError, IntegrityError) as db_err:
