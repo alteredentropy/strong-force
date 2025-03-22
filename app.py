@@ -318,9 +318,9 @@ def execute_sql(sql):
     try:
         with engine.connect() as connection:
             result = connection.execute(text(sql))
-            if op == "SELECT":
+            if op in ("SELECT", "SHOW"):
                 rows = result.fetchall()
-                result_list = [dict(row) for row in rows]
+                result_list = [dict(row._mapping) for row in rows]
                 return {"data": result_list}
             else:
                 rowcount = result.rowcount
@@ -365,7 +365,7 @@ class ResponseTableName(BaseModel):
     table: Optional[str]
 
 class ResponseOperation(BaseModel):
-    operation: Literal['SELECT','DELETE','UPDATE','CREATE']
+    operation: Literal['SELECT','DELETE','UPDATE','CREATE', "SHOW"]
 
 
 class AgentResponseTableName(BaseModel):
@@ -404,7 +404,7 @@ async def query_endpoint():
             "reason": str(ve),
             "hint": "Rephrase your query using clearer language."
         }, 400)
-    if str(sql_meta_formatted.operation.operation) != "SELECT":
+    if str(sql_meta_formatted.operation.operation) not in ("SELECT", "SHOW"):
         return error_response({
             "errorCode": "ERR_INVALID_ENDPOINT",
             "reason": "Non-SELECT operations are not allowed on the /query endpoint.",
@@ -414,10 +414,16 @@ async def query_endpoint():
 
         approved_sql = sql.messages[1].content #apply_business_rules(sql.messages[1].content, query_type="read")
         result = execute_sql(approved_sql)
-        return jsonify(result), 200
+        response_payload = {
+            "executed_query": approved_sql,
+            "result": result
+        }
+        return jsonify(response_payload), 200
     except Exception as e:
-        err_obj = e.args[0] if e.args else {}
-        return error_response(err_obj, 400)
+        err = e.args[0] if e.args else "An unknown error occurred."
+        if not isinstance(err, dict):
+            err = {"errorCode": "UNKNOWN_ERROR", "reason": err}
+        return error_response(err, 400)
 
 
 
@@ -453,7 +459,7 @@ async def mutate_endpoint():
             "reason": str(ve),
             "hint": "Rephrase your command to clearly indicate a data modification."
         }, 400)
-    if str(sql_meta_formatted.operation.operation) == "SELECT":
+    if str(sql_meta_formatted.operation.operation) in ("SELECT", "SHOW"):
         return error_response({
             "errorCode": "ERR_INVALID_ENDPOINT",
             "reason": "Read-only queries are not allowed on the /mutate endpoint.",
@@ -462,10 +468,16 @@ async def mutate_endpoint():
     try:
         approved_sql = sql.messages[1].content #apply_business_rules(sql.messages[1].content, query_type="write")
         result = execute_sql(approved_sql)
-        return jsonify(result), 200
+        response_payload = {
+            "executed_query": approved_sql,
+            "result": result
+        }
+        return jsonify(response_payload), 200
     except Exception as e:
-        err_obj = e.args[0] if e.args else {}
-        return error_response(err_obj, 400)
+        err = e.args[0] if e.args else "An unknown error occurred."
+        if not isinstance(err, dict):
+            err = {"errorCode": "UNKNOWN_ERROR", "reason": err}
+        return error_response(err, 400)
 
 # ------------------------------------------------------------------------------
 # Startup: Load Schema Information
@@ -478,3 +490,79 @@ with app.app_context():
 # ------------------------------------------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
+
+
+@app.route("/")
+def index():
+    return """
+    <html>
+        <head>
+            <meta charset="utf-8" />
+            <title>SQL Query/Mutate Form</title>
+        </head>
+        <body>
+            <h2>Send Your Query</h2>
+            <form id="sqlForm">
+            <div>
+                <label>
+                <input type="radio" name="endpoint" value="query" checked>
+                Query (Read)
+                </label>
+                <label>
+                <input type="radio" name="endpoint" value="mutate">
+                Mutate (Write)
+                </label>
+            </div>
+            <div>
+                <input type="text" name="q" placeholder="Enter your query here" style="width:300px;">
+            </div>
+            <div>
+                <button type="submit">Submit</button>
+            </div>
+            </form>
+
+            <div id="result" style="margin-top:20px;"></div>
+
+            <script>
+            document.getElementById('sqlForm').addEventListener('submit', function(event) {
+                event.preventDefault(); // Prevent the default form submission
+
+                const endpointChoice = document.querySelector('input[name="endpoint"]:checked').value;
+                const query = document.querySelector('input[name="q"]').value;
+                const resultDiv = document.getElementById('result');
+
+                if (endpointChoice === 'query') {
+                // For read-only endpoint, we use GET and pass q as a query parameter.
+                const url = `/query?q=${encodeURIComponent(query)}`;
+                fetch(url)
+                    .then(response => response.json())
+                    .then(data => {
+                    resultDiv.innerHTML = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
+                    })
+                    .catch(error => {
+                    console.error('Error:', error);
+                    resultDiv.textContent = 'Error: ' + error;
+                    });
+                } else if (endpointChoice === 'mutate') {
+                // For data modifications, we use POST with a JSON payload.
+                const url = `/mutate`;
+                fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ q: query })
+                })
+                    .then(response => response.json())
+                    .then(data => {
+                    resultDiv.innerHTML = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
+                    })
+                    .catch(error => {
+                    console.error('Error:', error);
+                    resultDiv.textContent = 'Error: ' + error;
+                    });
+                }
+            });
+            </script>
+        </body>
+    </html>
+
+    """
