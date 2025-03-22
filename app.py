@@ -9,6 +9,8 @@ from dotenv import load_dotenv
 from pydantic import BaseModel
 from typing import Sequence, Optional, Dict, Literal
 import yaml
+import traceback
+import logging
 
 from autogen_agentchat.agents import AssistantAgent, UserProxyAgent
 from autogen_agentchat.conditions import TextMentionTermination, MaxMessageTermination, HandoffTermination
@@ -160,8 +162,9 @@ async def create_agent_sql_parcer():
         tools=[extract_operation_tool,extract_table_name_tool],
         description="Extracts out different parts of a valid PostgreSQL SQL query",
         system_message="""You are an AI assistant that Extracts out different parts of a valid PostgreSQL SQL query.
-        You can extract the statement type and the full table name with the use of your tools.
+        You need to extract the statement type and the full table name with the use of your tools.
         """,
+        reflect_on_tool_use=True,
         )
 
     return agent
@@ -230,7 +233,7 @@ async def parse_nl_to_sql(nl_query):
     sql=None
     try:
         response = await agent.run(task=f"""
-                Convert this natural language statement into a valid SQL statement .Do not include markup and return only the sql statement.
+                Convert this natural language statement into a valid SQL statement.Do not include markup and return only the sql statement
                 Language statement: {nl_query}
                 """)
         sql = response
@@ -323,15 +326,19 @@ def execute_sql(sql):
                 rowcount = result.rowcount
                 return {"success": True, "rows_affected": rowcount}
     except (ProgrammingError, IntegrityError) as db_err:
+        error_details = traceback.format_exc()
+        logging.error("Database error: %s", error_details)
         raise Exception({
             "errorCode": "ERR_CONSTRAINT_VIOLATION",
-            "reason": "Database constraint or programming error encountered.",
+            "reason": f"Database constraint or programming error encountered: {str(db_err)}",
             "hint": "Ensure your request meets the database schema requirements."
         })
-    except SQLAlchemyError:
+    except SQLAlchemyError as sql_err:
+        error_details = traceback.format_exc()
+        logging.error("SQLAlchemy error: %s", error_details)
         raise Exception({
             "errorCode": "ERR_DATABASE",
-            "reason": "An error occurred while executing the SQL statement.",
+            "reason": f"An error occurred while executing the SQL statement: {str(sql_err)}",
             "hint": "Check the SQL syntax and try again."
         })
 
@@ -397,11 +404,11 @@ async def query_endpoint():
             "reason": str(ve),
             "hint": "Rephrase your query using clearer language."
         }, 400)
-    if sql_meta_formatted.operation != "SELECT":
+    if str(sql_meta_formatted.operation.operation) != "SELECT":
         return error_response({
             "errorCode": "ERR_INVALID_ENDPOINT",
             "reason": "Non-SELECT operations are not allowed on the /query endpoint.",
-            "hint": "Use the /mutate endpoint for data modifications."
+            "hint": f"Use the /mutate endpoint for data modifications. op - {str(sql_meta_formatted.operation.operation)}, sql- {str(sql.messages[1].content)}",
         }, 400)
     try:
 
@@ -446,11 +453,11 @@ async def mutate_endpoint():
             "reason": str(ve),
             "hint": "Rephrase your command to clearly indicate a data modification."
         }, 400)
-    if sql_meta_formatted.operation == "SELECT":
+    if str(sql_meta_formatted.operation.operation) == "SELECT":
         return error_response({
             "errorCode": "ERR_INVALID_ENDPOINT",
             "reason": "Read-only queries are not allowed on the /mutate endpoint.",
-            "hint": "Use the /query endpoint for data retrieval."
+            "hint": f"Use the /query endpoint for data modifications. op - {str(sql_meta_formatted.operation.operation)}, sql- {str(sql.messages[1].content)}",
         }, 400)
     try:
         approved_sql = sql.messages[1].content #apply_business_rules(sql.messages[1].content, query_type="write")
